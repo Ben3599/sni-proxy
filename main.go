@@ -65,6 +65,7 @@ type closeWriter interface {
 type config struct {
 	LogLevel        logLevel
 	ClientWhitelist []netip.Prefix
+	DomainWhitelist map[string]struct{}
 	Hosts           map[string]string
 	IPFamilies      map[string]ipFamily
 	OutboundIP      map[string]outboundSource
@@ -178,6 +179,7 @@ func defaultConfig() config {
 	return config{
 		LogLevel:        level,
 		ClientWhitelist: nil,
+		DomainWhitelist: map[string]struct{}{},
 		Hosts:           map[string]string{},
 		IPFamilies:      map[string]ipFamily{},
 		OutboundIP:      map[string]outboundSource{},
@@ -243,6 +245,10 @@ func parseYAMLConfig(data []byte) (config, error) {
 					if err := parseClientWhitelistLine(&cfg.ClientWhitelist, trimmedLine, lineNumber); err != nil {
 						return cfg, err
 					}
+				case "domain_whitelist":
+					if err := parseDomainWhitelistLine(cfg.DomainWhitelist, trimmedLine, lineNumber); err != nil {
+						return cfg, err
+					}
 				default:
 					return cfg, fmt.Errorf("unsupported configuration section %q on line %d", section, lineNumber)
 				}
@@ -289,6 +295,11 @@ func parseYAMLConfig(data []byte) (config, error) {
 				return cfg, fmt.Errorf("%q must be a list on line %d", key, lineNumber)
 			}
 			section = "client_whitelist"
+		case "domain_whitelist":
+			if value != "" {
+				return cfg, fmt.Errorf("%q must be a list on line %d", key, lineNumber)
+			}
+			section = "domain_whitelist"
 		default:
 			return cfg, fmt.Errorf("unsupported configuration key %q on line %d", key, lineNumber)
 		}
@@ -382,22 +393,46 @@ func parseOutboundIPMappingLine(outboundIP map[string]outboundSource, line strin
 }
 
 func parseClientWhitelistLine(whitelist *[]netip.Prefix, line string, lineNumber int) error {
-	if !strings.HasPrefix(line, "-") {
-		return fmt.Errorf("invalid client_whitelist item on line %d", lineNumber)
+	value, err := parseYAMLListItem(line, "client_whitelist", lineNumber)
+	if err != nil {
+		return err
 	}
 
-	value := strings.TrimSpace(strings.TrimPrefix(line, "-"))
-	if value == "" {
-		return fmt.Errorf("missing client_whitelist value on line %d", lineNumber)
-	}
-
-	prefix, err := parseIPOrPrefix(unquoteYAMLScalar(value))
+	prefix, err := parseIPOrPrefix(value)
 	if err != nil {
 		return fmt.Errorf("invalid client_whitelist value on line %d: %w", lineNumber, err)
 	}
 
 	*whitelist = append(*whitelist, prefix)
 	return nil
+}
+
+func parseDomainWhitelistLine(whitelist map[string]struct{}, line string, lineNumber int) error {
+	value, err := parseYAMLListItem(line, "domain_whitelist", lineNumber)
+	if err != nil {
+		return err
+	}
+
+	domain, err := normalizeHostName(value)
+	if err != nil {
+		return fmt.Errorf("invalid domain_whitelist value on line %d: %w", lineNumber, err)
+	}
+
+	whitelist[domain] = struct{}{}
+	return nil
+}
+
+func parseYAMLListItem(line string, section string, lineNumber int) (string, error) {
+	if !strings.HasPrefix(line, "-") {
+		return "", fmt.Errorf("invalid %s item on line %d", section, lineNumber)
+	}
+
+	value := strings.TrimSpace(strings.TrimPrefix(line, "-"))
+	if value == "" {
+		return "", fmt.Errorf("missing %s value on line %d", section, lineNumber)
+	}
+
+	return unquoteYAMLScalar(value), nil
 }
 
 func validateConfig(cfg config) error {
@@ -831,6 +866,16 @@ func remoteAddrIP(remoteAddr net.Addr) (netip.Addr, error) {
 	return addr.Unmap(), nil
 }
 
+func domainAllowed(serverName string, whitelist map[string]struct{}) bool {
+	if len(whitelist) == 0 {
+		return true
+	}
+
+	serverName = normalizeLookupName(serverName)
+	_, ok := whitelist[serverName]
+	return ok
+}
+
 func handleHTTPConnection(client net.Conn, dialTimeout time.Duration, readTimeout time.Duration) {
 	defer client.Close()
 
@@ -859,6 +904,10 @@ func handleHTTPConnection(client net.Conn, dialTimeout time.Duration, readTimeou
 	target, serverName, err := buildTargetAddress(authority, defaultHTTPPort)
 	if err != nil {
 		appLog.Errorf("Invalid HTTP host from %s: %v", client.RemoteAddr(), err)
+		return
+	}
+	if !domainAllowed(serverName, appConfig.DomainWhitelist) {
+		appLog.Warnf("Rejected HTTP request from %s: host %s is not allowed", client.RemoteAddr(), serverName)
 		return
 	}
 
@@ -892,6 +941,11 @@ func handleHTTPSConnection(client net.Conn, dialTimeout time.Duration, readTimeo
 	}
 
 	target := net.JoinHostPort(serverName, defaultHTTPSPort)
+	if !domainAllowed(serverName, appConfig.DomainWhitelist) {
+		appLog.Warnf("Rejected HTTPS request from %s: SNI %s is not allowed", client.RemoteAddr(), serverName)
+		return
+	}
+
 	route, err := resolveRouteTarget(target, serverName, appConfig)
 	if err != nil {
 		appLog.Errorf("Failed to resolve HTTPS target %s from %s: %v", target, client.RemoteAddr(), err)

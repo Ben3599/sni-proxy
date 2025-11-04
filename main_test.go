@@ -78,7 +78,7 @@ func TestReadTLSClientHelloExtractsSNI(t *testing.T) {
 }
 
 func TestParseYAMLConfigReadsLogLevelAndHosts(t *testing.T) {
-	cfg, err := parseYAMLConfig([]byte("# Test configuration\nlog_level: \"debug\" # request logs\nclient_whitelist:\n  - 192.0.2.10\n  - 198.51.100.0/24\n  - \"2001:db8::/64\"\nhosts:\n  Example.COM.: 203.0.113.10\n  ipv6.example.com: \"2001:db8::10\"\nip_family:\n  Example.COM.: ipv4\n  ipv6.example.com: ipv6\noutbound_ip:\n  Example.COM.: 198.51.100.20\n  ipv6.example.com: \"2001:db8::20\"\n  range.example.com: 198.51.100.20/24\n"))
+	cfg, err := parseYAMLConfig([]byte("# Test configuration\nlog_level: \"debug\" # request logs\nclient_whitelist:\n  - 192.0.2.10\n  - 198.51.100.0/24\n  - \"2001:db8::/64\"\ndomain_whitelist:\n  - Example.COM.\n  - ipv6.example.com\nhosts:\n  Example.COM.: 203.0.113.10\n  ipv6.example.com: \"2001:db8::10\"\nip_family:\n  Example.COM.: ipv4\n  ipv6.example.com: ipv6\noutbound_ip:\n  Example.COM.: 198.51.100.20\n  ipv6.example.com: \"2001:db8::20\"\n  range.example.com: 198.51.100.20/24\n"))
 	if err != nil {
 		t.Fatalf("parseYAMLConfig returned an error: %v", err)
 	}
@@ -96,6 +96,12 @@ func TestParseYAMLConfigReadsLogLevelAndHosts(t *testing.T) {
 	}
 	if cfg.ClientWhitelist[2].String() != "2001:db8::/64" {
 		t.Fatalf("ClientWhitelist[2] = %q, want %q", cfg.ClientWhitelist[2], "2001:db8::/64")
+	}
+	if _, ok := cfg.DomainWhitelist["example.com"]; !ok {
+		t.Fatal("DomainWhitelist[example.com] is missing")
+	}
+	if _, ok := cfg.DomainWhitelist["ipv6.example.com"]; !ok {
+		t.Fatal("DomainWhitelist[ipv6.example.com] is missing")
 	}
 	if cfg.Hosts["example.com"] != "203.0.113.10" {
 		t.Fatalf("Hosts[example.com] = %q, want %q", cfg.Hosts["example.com"], "203.0.113.10")
@@ -186,6 +192,26 @@ func TestParseYAMLConfigRejectsClientWhitelistMappingItem(t *testing.T) {
 		t.Fatal("parseYAMLConfig returned nil error")
 	}
 	if !strings.Contains(err.Error(), "invalid client_whitelist item") {
+		t.Fatalf("error = %q, want invalid item error", err.Error())
+	}
+}
+
+func TestParseYAMLConfigRejectsInvalidDomainWhitelistItem(t *testing.T) {
+	_, err := parseYAMLConfig([]byte("domain_whitelist:\n  - example.com:443\n"))
+	if err == nil {
+		t.Fatal("parseYAMLConfig returned nil error")
+	}
+	if !strings.Contains(err.Error(), "host must not include a port") {
+		t.Fatalf("error = %q, want port error", err.Error())
+	}
+}
+
+func TestParseYAMLConfigRejectsDomainWhitelistMappingItem(t *testing.T) {
+	_, err := parseYAMLConfig([]byte("domain_whitelist:\n  example.com: true\n"))
+	if err == nil {
+		t.Fatal("parseYAMLConfig returned nil error")
+	}
+	if !strings.Contains(err.Error(), "invalid domain_whitelist item") {
 		t.Fatalf("error = %q, want invalid item error", err.Error())
 	}
 }
@@ -469,6 +495,28 @@ func TestClientAllowedRejectsMissingIP(t *testing.T) {
 
 	if clientAllowed(remoteAddr, whitelist) {
 		t.Fatal("clientAllowed = true, want false")
+	}
+}
+
+func TestDomainAllowedAllowsAllWhenWhitelistIsEmpty(t *testing.T) {
+	if !domainAllowed("blocked.example.com", nil) {
+		t.Fatal("domainAllowed = false, want true")
+	}
+}
+
+func TestDomainAllowedMatchesNormalizedDomain(t *testing.T) {
+	whitelist := map[string]struct{}{"example.com": {}}
+
+	if !domainAllowed("Example.COM.", whitelist) {
+		t.Fatal("domainAllowed = false, want true")
+	}
+}
+
+func TestDomainAllowedRejectsMissingDomain(t *testing.T) {
+	whitelist := map[string]struct{}{"example.com": {}}
+
+	if domainAllowed("other.example.com", whitelist) {
+		t.Fatal("domainAllowed = true, want false")
 	}
 }
 
