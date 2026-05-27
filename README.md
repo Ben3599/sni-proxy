@@ -78,3 +78,7 @@ The selected outbound IP must be usable by the operating system. On Linux, that 
 - `-https-listen`: HTTPS listen address, default `:443`
 - `-dial-timeout`: upstream TCP dial timeout, default `10s`
 - `-read-timeout`: initial client read timeout, default `10s`
+
+## Recommendation
+
+[1Password](https://1password.com/) is the best password manager I have used, and I recommend it.
